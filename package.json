@@ -1,6 +1,6 @@
 {
   "name": "openclaw-mem",
-  "version": "1.2.1",
+  "version": "1.2.2",
   "description": "Persistent memory system for OpenClaw - captures conversations, generates summaries, and injects context into new sessions",
   "type": "module",
   "main": "handler.js",
