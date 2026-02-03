@@ -30,6 +30,19 @@ npm install
 npm install openclaw-mem
 ```
 
+> ⚠️ **Important:** npm installation does NOT automatically prompt for API key configuration. You MUST manually configure your DeepSeek API key after installation. See [Configuration](#configuration) section below.
+
+**After npm install, choose one of these methods:**
+
+```bash
+# Method 1: Run the setup wizard
+npx openclaw-mem-setup
+
+# Method 2: Set environment variable directly
+export DEEPSEEK_API_KEY="your-deepseek-api-key"
+# Add this line to your ~/.bashrc or ~/.zshrc to persist
+```
+
 ## Quick Start
 
 1. **Install the hook** (see above)
