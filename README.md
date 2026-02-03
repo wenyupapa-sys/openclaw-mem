@@ -100,6 +100,25 @@ MCP Tools:
 
 ## Configuration
 
+### Environment Variables
+
+```bash
+# Required for AI summarization (optional but recommended)
+export DEEPSEEK_API_KEY="your-deepseek-api-key"
+
+# Optional: Custom DeepSeek endpoint
+export DEEPSEEK_BASE_URL="https://api.deepseek.com/v1"
+
+# Optional: Custom model
+export DEEPSEEK_MODEL="deepseek-chat"
+```
+
+Get your DeepSeek API key at: https://platform.deepseek.com/
+
+> **Note:** Without `DEEPSEEK_API_KEY`, the system will still work but won't generate AI summaries for sessions.
+
+### OpenClaw Config
+
 Add to your OpenClaw config:
 
 ```json
