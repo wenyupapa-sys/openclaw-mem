@@ -6,7 +6,8 @@
   "main": "handler.js",
   "bin": {
     "openclaw-mem-api": "mcp-http-api.js",
-    "openclaw-mem-mcp": "mcp-server.js"
+    "openclaw-mem-mcp": "mcp-server.js",
+    "openclaw-mem-setup": "setup.js"
   },
   "scripts": {
     "test": "vitest run",
@@ -17,7 +18,9 @@
     "mcp": "node mcp-server.js",
     "api": "node mcp-http-api.js",
     "api:start": "nohup node mcp-http-api.js > ~/.openclaw-mem/logs/api.log 2>&1 &",
-    "debug": "node debug-logger.js"
+    "debug": "node debug-logger.js",
+    "setup": "node setup.js",
+    "postinstall": "node setup.js"
   },
   "keywords": [
     "openclaw",
@@ -59,6 +62,7 @@
     "realtime-monitor.js",
     "session-watcher.js",
     "sync-recent.js",
+    "setup.js",
     "HOOK.md",
     "MCP.json",
     "README.md"

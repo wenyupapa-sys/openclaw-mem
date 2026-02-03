@@ -34,11 +34,19 @@ npm install openclaw-mem
 
 1. **Install the hook** (see above)
 
-2. **Restart OpenClaw** to load the hook
+2. **Run setup** - configure your DeepSeek API key (prompted automatically after install)
+   ```bash
+   # Or run manually later
+   npm run setup
+   # or
+   npx openclaw-mem-setup
+   ```
 
-3. **Start chatting** - conversations are automatically saved
+3. **Restart OpenClaw** to load the hook
 
-4. **Query memories** - ask "what did we discuss before?" and the AI will search the memory database
+4. **Start chatting** - conversations are automatically saved
+
+5. **Query memories** - ask "what did we discuss before?" and the AI will search the memory database
 
 ## Events Captured
 
