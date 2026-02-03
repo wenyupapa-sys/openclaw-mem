@@ -19,7 +19,7 @@ A persistent memory system for [OpenClaw](https://github.com/openclaw) that auto
 
 ```bash
 # Clone to OpenClaw hooks directory
-git clone https://github.com/YOUR_USERNAME/openclaw-mem.git ~/.openclaw/hooks/openclaw-mem
+git clone https://github.com/wenyupapa-sys/openclaw-mem.git ~/.openclaw/hooks/openclaw-mem
 cd ~/.openclaw/hooks/openclaw-mem
 npm install
 ```
