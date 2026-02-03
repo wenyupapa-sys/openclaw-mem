@@ -1,0 +1,35 @@
+# Dependencies
+node_modules/
+
+# Build
+dist/
+
+# IDE
+.idea/
+.vscode/
+*.swp
+*.swo
+
+# OS
+.DS_Store
+Thumbs.db
+
+# Test
+coverage/
+
+# Logs
+*.log
+logs/
+
+# Local data (don't include user's memory database)
+*.db
+*.db-wal
+*.db-shm
+
+# Temp
+/tmp/
+*.tmp
+
+# Environment
+.env
+.env.local

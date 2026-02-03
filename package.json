@@ -1,0 +1,78 @@
+{
+  "name": "openclaw-mem",
+  "version": "1.2.0",
+  "description": "Persistent memory system for OpenClaw - captures conversations, generates summaries, and injects context into new sessions",
+  "type": "module",
+  "main": "handler.js",
+  "bin": {
+    "openclaw-mem-api": "mcp-http-api.js",
+    "openclaw-mem-mcp": "mcp-server.js"
+  },
+  "scripts": {
+    "test": "vitest run",
+    "test:watch": "vitest",
+    "test:coverage": "vitest run --coverage",
+    "monitor": "node monitor.js",
+    "watch": "node session-watcher.js",
+    "mcp": "node mcp-server.js",
+    "api": "node mcp-http-api.js",
+    "api:start": "nohup node mcp-http-api.js > ~/.openclaw-mem/logs/api.log 2>&1 &",
+    "debug": "node debug-logger.js"
+  },
+  "keywords": [
+    "openclaw",
+    "memory",
+    "ai",
+    "llm",
+    "context",
+    "persistence",
+    "mcp",
+    "model-context-protocol",
+    "sqlite",
+    "hooks"
+  ],
+  "author": "Aaron",
+  "license": "MIT",
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/YOUR_USERNAME/openclaw-mem.git"
+  },
+  "bugs": {
+    "url": "https://github.com/YOUR_USERNAME/openclaw-mem/issues"
+  },
+  "homepage": "https://github.com/YOUR_USERNAME/openclaw-mem#readme",
+  "engines": {
+    "node": ">=18.0.0"
+  },
+  "files": [
+    "handler.js",
+    "database.js",
+    "context-builder.js",
+    "extractor.js",
+    "gateway-llm.js",
+    "mcp-server.js",
+    "mcp-http-api.js",
+    "mem-search.sh",
+    "mem-get.sh",
+    "monitor.js",
+    "debug-logger.js",
+    "realtime-monitor.js",
+    "session-watcher.js",
+    "sync-recent.js",
+    "HOOK.md",
+    "MCP.json",
+    "README.md"
+  ],
+  "dependencies": {
+    "@modelcontextprotocol/sdk": "^1.25.3",
+    "better-sqlite3": "^11.0.0"
+  },
+  "devDependencies": {
+    "vitest": "^2.0.0"
+  },
+  "openclaw": {
+    "hooks": [
+      "."
+    ]
+  }
+}

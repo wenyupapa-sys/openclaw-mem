@@ -1,0 +1,11 @@
+{
+  "mcpServers": {
+    "openclaw-mem-search": {
+      "type": "stdio",
+      "command": "node",
+      "args": ["mcp-server.js"],
+      "cwd": "${HOOK_ROOT}",
+      "description": "Memory search tools for OpenClaw-Mem"
+    }
+  }
+}
