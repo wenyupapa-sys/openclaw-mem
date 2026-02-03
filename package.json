@@ -35,12 +35,12 @@
   "license": "MIT",
   "repository": {
     "type": "git",
-    "url": "git+https://github.com/YOUR_USERNAME/openclaw-mem.git"
+    "url": "git+https://github.com/wenyupapa-sys/openclaw-mem.git"
   },
   "bugs": {
-    "url": "https://github.com/YOUR_USERNAME/openclaw-mem/issues"
+    "url": "https://github.com/wenyupapa-sys/openclaw-mem/issues"
   },
-  "homepage": "https://github.com/YOUR_USERNAME/openclaw-mem#readme",
+  "homepage": "https://github.com/wenyupapa-sys/openclaw-mem#readme",
   "engines": {
     "node": ">=18.0.0"
   },
