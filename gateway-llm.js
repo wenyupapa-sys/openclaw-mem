@@ -27,7 +27,7 @@ function truncateText(text, maxChars) {
   return text.slice(0, maxChars) + '…';
 }
 
-function formatTranscript(messages, maxChars = 8000) {
+function formatTranscript(messages, maxChars = 12000) {
   const lines = [];
   for (const m of messages) {
     const role = (m.role || 'unknown').toUpperCase();
@@ -60,6 +60,7 @@ function normalizeSummaryFields(obj) {
   };
   return {
     request: pick('request'),
+    investigated: pick('investigated'),
     learned: pick('learned'),
     completed: pick('completed'),
     next_steps: pick('next_steps')
@@ -118,20 +119,37 @@ async function callGatewayChat(messages, options = {}) {
 
 export async function summarizeSession(messages, options = {}) {
   const { sessionKey = 'unknown' } = options;
-  const transcript = formatTranscript(messages);
+  const transcript = formatTranscript(messages, 12000);
   if (!transcript) return null;
 
   const buildPrompts = (strict = false) => {
-    const systemPrompt = [
-      '你是一个对话总结助手。请用中文总结这段对话，返回一个 JSON 对象，包含以下字段：',
-      '- request: 用户的主要问题或需求（一句话）',
-      '- learned: 用户从对话中学到了什么',
-      '- completed: 完成了什么任务或解答',
-      '- next_steps: 建议的下一步行动',
-      '只返回 JSON 对象，不要 markdown 代码块，不要其他内容。',
-      strict ? '重要：只输出纯 JSON，不要任何额外文字。' : ''
-    ].filter(Boolean).join('\n');
-    const userPrompt = '对话记录:\n' + transcript + '\n\nJSON:';
+    const systemPrompt = `You are a session summarizer for an AI agent memory system. Your summaries help the agent recall past work in future sessions.
+
+INSTRUCTIONS:
+- Focus on OUTCOMES and DELIVERABLES, not conversational flow
+- Use action verbs: implemented, fixed, configured, discovered, decided, explored
+- Be specific: include file names, tool names, error messages, key decisions
+- Write in the language the user used (Chinese if they spoke Chinese, English if English)
+
+OUTPUT FORMAT: Return ONLY a valid JSON object with these fields:
+{
+  "request": "What the user wanted to accomplish (1 sentence, specific)",
+  "investigated": "What was explored or researched to fulfill the request",
+  "learned": "Key technical insights, discoveries, or new understanding gained",
+  "completed": "Concrete deliverables: what was built, fixed, configured, or decided",
+  "next_steps": "Unfinished work or logical follow-up actions (null if fully completed)"
+}
+
+QUALITY GUIDELINES:
+- "request" should capture the real goal, not just "user asked a question"
+- "investigated" should list specific files read, APIs explored, architectures examined
+- "learned" should contain reusable knowledge (not "learned how to do X" but the actual insight)
+- "completed" should be a concrete outcome someone can verify
+- "next_steps" should be actionable, not vague
+
+${strict ? 'CRITICAL: Output ONLY the JSON object. No markdown, no explanation, no code fences.' : ''}`;
+
+    const userPrompt = 'Session transcript:\n' + transcript + '\n\nJSON:';
     return [
       { role: 'system', content: systemPrompt },
       { role: 'user', content: userPrompt }
@@ -139,17 +157,94 @@ export async function summarizeSession(messages, options = {}) {
   };
 
   // First attempt
-  let content = await callGatewayChat(buildPrompts(false), { sessionKey, temperature: 0.2, max_tokens: 300 });
+  let content = await callGatewayChat(buildPrompts(false), { sessionKey, temperature: 0.2, max_tokens: 600 });
   let parsed = parseSummaryJson(content || '');
   if (parsed) return normalizeSummaryFields(parsed);
 
   // Retry once with stricter instruction
-  content = await callGatewayChat(buildPrompts(true), { sessionKey, temperature: 0.2, max_tokens: 300 });
+  content = await callGatewayChat(buildPrompts(true), { sessionKey, temperature: 0.1, max_tokens: 600 });
   parsed = parseSummaryJson(content || '');
   if (parsed) return normalizeSummaryFields(parsed);
 
   return null;
 }
+
+// ============ Local Embedding Model (Qwen3-Embedding-0.6B) ============
+
+const EMBEDDING_MODEL = 'Xenova/multilingual-e5-small';
+const EMBEDDING_DIMS = 384;
+const EMBEDDING_PREFIX = 'query: ';
+
+// Singleton: lazily initialized embedding pipeline
+let _extractorPromise = null;
+
+function getExtractor() {
+  if (!_extractorPromise) {
+    _extractorPromise = (async () => {
+      try {
+        const { pipeline } = await import('@huggingface/transformers');
+        console.log('[openclaw-mem] Loading embedding model (first run downloads ~110MB)...');
+        const extractor = await pipeline('feature-extraction', EMBEDDING_MODEL);
+        console.log('[openclaw-mem] Embedding model loaded');
+        return extractor;
+      } catch (err) {
+        console.error('[openclaw-mem] Failed to load embedding model:', err.message);
+        _extractorPromise = null; // Allow retry
+        return null;
+      }
+    })();
+  }
+  return _extractorPromise;
+}
+
+/**
+ * Generate embedding vector for text using local Qwen3-Embedding-0.6B model.
+ * Returns Float32Array of 1024 dimensions, or null on failure.
+ */
+export async function callGatewayEmbeddings(text) {
+  try {
+    const extractor = await getExtractor();
+    if (!extractor) return null;
+
+    const input = EMBEDDING_PREFIX + text;
+    const output = await extractor(input, {
+      pooling: 'mean',
+      normalize: true,
+    });
+
+    return new Float32Array(output.data);
+  } catch (err) {
+    console.error('[openclaw-mem] Embedding generation error:', err.message);
+    return null;
+  }
+}
+
+/**
+ * Generate embeddings for multiple texts sequentially.
+ * Returns array of Float32Array, or null entries on failure.
+ */
+export async function batchEmbeddings(texts) {
+  const extractor = await getExtractor();
+  if (!extractor) return texts.map(() => null);
+
+  const results = [];
+  for (const text of texts) {
+    try {
+      const input = EMBEDDING_PREFIX + text;
+      const output = await extractor(input, {
+        pooling: 'mean',
+        normalize: true,
+      });
+      results.push(new Float32Array(output.data));
+    } catch (err) {
+      console.error('[openclaw-mem] Batch embedding error:', err.message);
+      results.push(null);
+    }
+  }
+  return results;
+}
+
+export { EMBEDDING_DIMS };
 
 export const INTERNAL_SUMMARY_PREFIX = SUMMARY_SESSION_PREFIX;
 export { callGatewayChat };

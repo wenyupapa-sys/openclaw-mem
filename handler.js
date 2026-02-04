@@ -14,11 +14,11 @@ import path from 'node:path';
 import os from 'node:os';
 import { fileURLToPath } from 'node:url';
 import { spawn } from 'node:child_process';
-import { summarizeSession, INTERNAL_SUMMARY_PREFIX } from './gateway-llm.js';
+import { summarizeSession, INTERNAL_SUMMARY_PREFIX, callGatewayEmbeddings } from './gateway-llm.js';
 
 const __dirname = path.dirname(fileURLToPath(import.meta.url));
 console.log('[openclaw-mem] >>> HANDLER LOADED AT', new Date().toISOString(), '<<<');
-const USE_LLM_EXTRACTION = false;
+const USE_LLM_EXTRACTION = true;
 const SUMMARY_MAX_MESSAGES = 200;
 const MCP_API_PORT = 18790;
 
@@ -255,102 +255,9 @@ async function handleAgentBootstrap(event) {
     console.log('[openclaw-mem] Sample has content:', !!sample.content);
   }
 
-  // ============ NEW: Capture incoming messages to database ============
-  // This ensures every message through gateway is captured, not just on /new
-  // Messages can be in: event.messages (array), event.message, or event.context.userMessage
-  let messagesToCapture = [];
-
-  // ============ Capture messages from session file ============
-  // At bootstrap time, the incoming message isn't in the event yet
-  // But we can read the session file which contains previous messages
-
-  // Construct session file path from sessionKey
-  // Session files are stored at ~/.openclaw/agents/main/sessions/<sessionKey>.jsonl
-  const agentId = event.context?.agentId || 'main';
-  const sessionFile = path.join(os.homedir(), '.openclaw', 'agents', agentId, 'sessions', `${sessionKey}.jsonl`);
-  console.log('[openclaw-mem] Constructed session file path:', sessionFile);
-
-  // Check if session file exists
-  let sessionFileExists = false;
-  try {
-    await fs.access(sessionFile);
-    sessionFileExists = true;
-  } catch {
-    sessionFileExists = false;
-  }
-
-  if (sessionFileExists) {
-    console.log('[openclaw-mem] Found session file:', sessionFile);
-    try {
-      const messages = await extractSessionContent(sessionFile, 50);
-      if (messages && messages.length > 0) {
-        console.log(`[openclaw-mem] Found ${messages.length} messages in session file`);
-
-        // Get or create session for this sessionKey
-        let dbSessionId = getOrCreateSessionForKey(sessionKey, workspaceDir);
-
-        // Track which messages we've already saved (to avoid duplicates)
-        const savedHashes = new Set();
-        try {
-          const existing = database.getRecentObservations(null, 100);
-          for (const obs of existing) {
-            // Content is stored in the 'result' field as JSON
-            try {
-              const result = JSON.parse(obs.result || '{}');
-              if (result.content) {
-                savedHashes.add(hashContent(result.content));
-              }
-            } catch {
-              // If result isn't JSON, use summary
-              if (obs.summary) {
-                savedHashes.add(hashContent(obs.summary));
-              }
-            }
-          }
-          console.log(`[openclaw-mem] Loaded ${savedHashes.size} existing message hashes`);
-        } catch (e) {
-          console.log('[openclaw-mem] Could not check existing observations:', e.message);
-        }
-
-        let newCount = 0;
-        for (const msg of messages) {
-          const contentHash = hashContent(msg.content);
-          if (savedHashes.has(contentHash)) {
-            continue; // Skip already saved messages
-          }
-
-          const toolName = msg.role === 'assistant' ? 'AssistantMessage' : 'UserMessage';
-          const summary = msg.content.slice(0, 100) + (msg.content.length > 100 ? '...' : '');
-          database.saveObservation(
-            dbSessionId,
-            toolName,
-            { role: msg.role, sessionKey },
-            { content: msg.content },
-            {
-              summary,
-              // Use full message text so FTS can index real topics
-              concepts: msg.content,
-              tokensDiscovery: estimateTokens(msg.content),
-              tokensRead: estimateTokens(summary)
-            }
-          );
-          savedHashes.add(contentHash);
-          newCount++;
-        }
-
-        if (newCount > 0) {
-          console.log(`[openclaw-mem] ✓ Saved ${newCount} new messages to database`);
-        } else {
-          console.log('[openclaw-mem] All messages already in database');
-        }
-      }
-    } catch (err) {
-      console.log('[openclaw-mem] Could not read session file:', err.message);
-    }
-  } else {
-    console.log('[openclaw-mem] No session file found in context');
-  }
-  // ============ END: Capture messages ============
+  // Raw messages are no longer stored individually — session summaries capture the important bits.
+  // This eliminates noise from greetings and low-value messages.
+  console.log('[openclaw-mem] Skipping per-message capture (handled via session summary)');
 
   // Ensure API server is running
   await startApiServer();
@@ -488,30 +395,8 @@ async function handleCommandNew(event) {
 
   if (messages && messages.length > 0) {
     console.log(`[openclaw-mem] Extracted ${messages.length} messages from session`);
-
-    // Save each message as an observation
-    for (const msg of messages) {
-      const toolName = msg.role === 'user' ? 'UserMessage' : 'AssistantMessage';
-      const summary = msg.content.slice(0, 100) + (msg.content.length > 100 ? '...' : '');
-
-      database.saveObservation(
-        sessionId,
-        toolName,
-        { role: msg.role },
-        { content: msg.content },
-        {
-          summary,
-          // Use message body for concepts to keep topic search working
-          concepts: msg.content,
-          tokensDiscovery: estimateTokens(msg.content),
-          tokensRead: estimateTokens(summary)
-        }
-      );
-    }
-
-    console.log('[openclaw-mem] Session saved successfully');
-    console.log('[openclaw-mem] >>> CODE VERSION 2026-02-03-1622 <<<');
-    console.log('[openclaw-mem] >>> STARTING AI SUMMARY <<<');
+    // Raw messages are no longer stored individually — only the AI summary matters.
+    console.log('[openclaw-mem] Generating AI summary...');
 
     // Generate AI summary using DeepSeek
     let aiSummary = null;
@@ -528,6 +413,7 @@ async function handleCommandNew(event) {
         sessionId,
         summaryContent,
         aiSummary.request,
+        aiSummary.investigated || null,
         aiSummary.learned,
         aiSummary.completed,
         aiSummary.next_steps
@@ -545,6 +431,7 @@ async function handleCommandNew(event) {
         `Session with ${messages.length} messages`,
         fallbackRequest,
         null,
+        null,
         fallbackCompleted ? `Discussed: ${fallbackCompleted}` : null,
         null
       );
@@ -558,76 +445,20 @@ async function handleCommandNew(event) {
 
 /**
  * Handle agent:response event
- * Capture assistant responses to database
+ * Skip storing raw assistant messages — session summary at stop/new captures the important bits.
+ * This avoids noise from greetings, acknowledgments, and other low-value messages.
  */
 async function handleAgentResponse(event) {
-  console.log('[openclaw-mem] Agent response event');
-
-  if (!await loadModules()) return;
-
-  const sessionKey = event.sessionKey || 'unknown';
-  const response = event.response || event.message || event.content;
-  const workspaceDir = event.context?.workspaceDir || path.join(os.homedir(), '.openclaw', 'workspace');
-
-  if (response && typeof response === 'string' && response.trim()) {
-    console.log('[openclaw-mem] Capturing assistant response:', response.slice(0, 50) + '...');
-
-    let sessionId = getOrCreateSessionForKey(sessionKey, workspaceDir);
-
-    const summary = response.slice(0, 100) + (response.length > 100 ? '...' : '');
-    database.saveObservation(
-      sessionId,
-      'AssistantMessage',
-      { role: 'assistant', sessionKey },
-      { content: response },
-      {
-        summary,
-        // Keep full content in concepts column for better topic recall
-        concepts: response,
-        tokensDiscovery: estimateTokens(response),
-        tokensRead: estimateTokens(summary)
-      }
-    );
-    console.log('[openclaw-mem] ✓ Assistant response saved to database');
-  }
+  console.log('[openclaw-mem] Agent response event (skipped — captured via session summary)');
 }
 
 /**
  * Handle message events
- * Alternative event type for capturing messages
+ * Skip storing raw messages — session summary at stop/new captures the important bits.
+ * This avoids noise from greetings, acknowledgments, and other low-value messages.
  */
 async function handleMessage(event) {
-  console.log('[openclaw-mem] Message event:', event.action || 'unknown');
-
-  if (!await loadModules()) return;
-
-  const sessionKey = event.sessionKey || 'unknown';
-  const message = event.message || event.content || event.text;
-  const role = event.role || event.action || 'user';
-  const workspaceDir = event.context?.workspaceDir || path.join(os.homedir(), '.openclaw', 'workspace');
-
-  if (message && typeof message === 'string' && message.trim() && !message.startsWith('/')) {
-    console.log(`[openclaw-mem] Capturing ${role} message:`, message.slice(0, 50) + '...');
-
-    let sessionId = getOrCreateSessionForKey(sessionKey, workspaceDir);
-
-    const toolName = role === 'assistant' ? 'AssistantMessage' : 'UserMessage';
-    const summary = message.slice(0, 100) + (message.length > 100 ? '...' : '');
-    database.saveObservation(
-      sessionId,
-      toolName,
-      { role, sessionKey },
-      { content: message },
-      {
-        summary,
-        // Index actual message text (not just role) for topic search
-        concepts: message,
-        tokensDiscovery: estimateTokens(message),
-        tokensRead: estimateTokens(summary)
-      }
-    );
-    console.log(`[openclaw-mem] ✓ ${role} message saved to database`);
-  }
+  console.log('[openclaw-mem] Message event (skipped — captured via session summary)');
 }
 
 /**
@@ -830,15 +661,19 @@ async function handleToolPost(event) {
         extractedNarrative = extracted.narrative || narrative;
         extractedFacts = extracted.facts;
         extractedConcepts = extracted.concepts?.join(', ') || extractedConcepts;
+        // Use LLM-generated title as summary if available
+        if (extracted.title) {
+          summary = extracted.title;
+        }
       }
-      console.log(`[openclaw-mem] LLM extracted: type=${extractedType}, concepts=${extractedConcepts.slice(0, 50)}...`);
+      console.log(`[openclaw-mem] LLM extracted: type=${extractedType}, title=${summary.slice(0, 60)}, concepts=${extractedConcepts}`);
     } catch (err) {
       console.log(`[openclaw-mem] LLM extraction failed, using fallback: ${err.message}`);
     }
   }
 
   // Save observation with extended metadata
-  database.saveObservation(
+  const saveResult = database.saveObservation(
     sessionId,
     toolName,
     toolInput,
@@ -849,7 +684,7 @@ async function handleToolPost(event) {
       tokensDiscovery: estimateTokens(responseStr),
       tokensRead: estimateTokens(summary),
       type: extractedType,
-      narrative: extractedNarrative.slice(0, 500),
+      narrative: extractedNarrative.slice(0, 1000),
       facts: extractedFacts,
       filesRead: filesRead,
       filesModified: filesModified
@@ -857,6 +692,21 @@ async function handleToolPost(event) {
   );
 
   console.log(`[openclaw-mem] ✓ Tool ${toolName} recorded (type: ${extractedType})`);
+
+  // Fire-and-forget: generate embedding for the new observation
+  if (saveResult.success && saveResult.id) {
+    const embeddingText = [summary, extractedNarrative].filter(Boolean).join(' ').trim();
+    if (embeddingText.length > 10) {
+      callGatewayEmbeddings(embeddingText).then(embedding => {
+        if (embedding) {
+          database.saveEmbedding(Number(saveResult.id), embedding);
+          console.log(`[openclaw-mem] ✓ Embedding saved for observation #${saveResult.id}`);
+        }
+      }).catch(err => {
+        console.log(`[openclaw-mem] Embedding generation failed: ${err.message}`);
+      });
+    }
+  }
 }
 
 /**
@@ -898,40 +748,7 @@ async function handleUserPromptSubmit(event) {
   database.saveUserPrompt(sessionId, prompt);
   console.log(`[openclaw-mem] ✓ User prompt saved (${prompt.slice(0, 50)}...)`);
 
-  // Also save as an observation for searchability
-  const summary = prompt.slice(0, 100) + (prompt.length > 100 ? '...' : '');
-
-  // Try LLM extraction for concepts
-  let concepts = prompt;
-  if (USE_LLM_EXTRACTION && extractor && extractor.extractConcepts) {
-    try {
-      const extracted = await extractor.extractConcepts(prompt);
-      if (extracted && extracted.length > 0) {
-        concepts = extracted.join(', ');
-      }
-    } catch (err) {
-      console.log('[openclaw-mem] LLM extraction failed for prompt:', err.message);
-    }
-  }
-
-  database.saveObservation(
-    sessionId,
-    'UserPrompt',
-    { prompt: prompt.slice(0, 500) },
-    { recorded: true },
-    {
-      summary,
-      concepts,
-      tokensDiscovery: estimateTokens(prompt),
-      tokensRead: estimateTokens(summary),
-      type: 'user_input',
-      narrative: `User asked: ${summary}`,
-      facts: null,
-      filesRead: null,
-      filesModified: null
-    }
-  );
-  console.log('[openclaw-mem] ✓ User prompt observation saved');
+  // User prompts are saved to user_prompts table only (no observation duplication).
 }
 
 /**
@@ -1014,6 +831,7 @@ async function handleAgentStop(event) {
         sessionId,
         summaryContent,
         summary.request,
+        summary.investigated || null,
         summary.learned,
         summary.completed,
         summary.next_steps
@@ -1031,7 +849,8 @@ async function handleAgentStop(event) {
         sessionId,
         summaryContent,
         firstUserMsg,
-        '',
+        null,
+        null,
         `Discussed: ${lastAssistant}`,
         null
       );

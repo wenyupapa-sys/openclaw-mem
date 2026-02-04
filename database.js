@@ -7,6 +7,7 @@ import fs from 'node:fs';
 import path from 'node:path';
 import os from 'node:os';
 import Database from 'better-sqlite3';
+import * as sqliteVec from 'sqlite-vec';
 
 const DATA_DIR = path.join(os.homedir(), '.openclaw-mem');
 const DB_PATH = path.join(DATA_DIR, 'memory.db');
@@ -19,6 +20,14 @@ if (!fs.existsSync(DATA_DIR)) {
 // Initialize database
 const db = new Database(DB_PATH);
 db.pragma('journal_mode = WAL');
+
+// Load sqlite-vec extension for vector search
+try {
+  sqliteVec.load(db);
+  console.log('[openclaw-mem] sqlite-vec extension loaded');
+} catch (e) {
+  console.error('[openclaw-mem] Failed to load sqlite-vec:', e.message);
+}
 
 // Create tables (base schema without new columns for backward compatibility)
 db.exec(`
@@ -168,6 +177,28 @@ db.exec(`
   END;
 `);
 
+// Create vec0 virtual table for vector embeddings
+// Drop and recreate if dimension mismatch (migration from 768/1024 to 384)
+try {
+  const vecInfo = db.prepare(`SELECT sql FROM sqlite_master WHERE type='table' AND name='observation_embeddings'`).get();
+  if (vecInfo && !vecInfo.sql.includes('float[384]')) {
+    console.log('[openclaw-mem] Recreating vec0 table with 384 dimensions...');
+    db.exec(`DROP TABLE IF EXISTS observation_embeddings`);
+  }
+} catch (e) { /* table doesn't exist yet */ }
+
+try {
+  db.exec(`
+    CREATE VIRTUAL TABLE IF NOT EXISTS observation_embeddings USING vec0(
+      observation_id INTEGER PRIMARY KEY,
+      embedding float[384]
+    );
+  `);
+  console.log('[openclaw-mem] observation_embeddings vec0 table ready');
+} catch (e) {
+  console.error('[openclaw-mem] Failed to create vec0 table:', e.message);
+}
+
 // Prepared statements
 const stmts = {
   // Sessions
@@ -261,8 +292,8 @@ const stmts = {
 
   // Summaries
   saveSummary: db.prepare(`
-    INSERT INTO summaries (session_id, content, request, learned, completed, next_steps)
-    VALUES (?, ?, ?, ?, ?, ?)
+    INSERT INTO summaries (session_id, content, request, investigated, learned, completed, next_steps)
+    VALUES (?, ?, ?, ?, ?, ?, ?)
   `),
 
   getRecentSummaries: db.prepare(`
@@ -290,6 +321,34 @@ const stmts = {
     LIMIT 1
   `),
 
+  // Embedding operations
+  saveEmbedding: db.prepare(`
+    INSERT OR REPLACE INTO observation_embeddings (observation_id, embedding)
+    VALUES (?, ?)
+  `),
+
+  searchByVector: db.prepare(`
+    SELECT observation_id, distance
+    FROM observation_embeddings
+    WHERE embedding MATCH ?
+    AND k = ?
+    ORDER BY distance
+  `),
+
+  getEmbeddingCount: db.prepare(`
+    SELECT COUNT(*) as count FROM observation_embeddings
+  `),
+
+  getObservationsWithoutEmbeddings: db.prepare(`
+    SELECT o.id, o.summary, o.narrative
+    FROM observations o
+    LEFT JOIN observation_embeddings oe ON o.id = oe.observation_id
+    WHERE oe.observation_id IS NULL
+    AND (o.summary IS NOT NULL OR o.narrative IS NOT NULL)
+    ORDER BY o.id
+    LIMIT ?
+  `),
+
   // Stats
   getStats: db.prepare(`
     SELECT
@@ -298,7 +357,8 @@ const stmts = {
       (SELECT COUNT(*) FROM summaries) as total_summaries,
       (SELECT COUNT(*) FROM user_prompts) as total_user_prompts,
       (SELECT SUM(tokens_discovery) FROM observations) as total_discovery_tokens,
-      (SELECT SUM(tokens_read) FROM observations) as total_read_tokens
+      (SELECT SUM(tokens_read) FROM observations) as total_read_tokens,
+      (SELECT COUNT(*) FROM observation_embeddings) as total_embeddings
   `)
 };
 
@@ -489,8 +549,8 @@ export const database = {
   },
 
   // Summary operations
-  saveSummary(sessionId, content, request = null, learned = null, completed = null, nextSteps = null) {
-    const result = stmts.saveSummary.run(sessionId, content, request, learned, completed, nextSteps);
+  saveSummary(sessionId, content, request = null, investigated = null, learned = null, completed = null, nextSteps = null) {
+    const result = stmts.saveSummary.run(sessionId, content, request, investigated, learned, completed, nextSteps);
     return { success: true, id: result.lastInsertRowid };
   },
 
@@ -504,6 +564,51 @@ export const database = {
 
   getSummaryBySessionKey(sessionKey) {
     return stmts.getSummaryBySessionKey.get(sessionKey);
+  },
+
+  // Embedding operations
+  saveEmbedding(observationId, embedding) {
+    try {
+      // sqlite-vec expects Float32Array directly, not Buffer
+      const vec = embedding instanceof Float32Array
+        ? embedding
+        : new Float32Array(embedding);
+      stmts.saveEmbedding.run(BigInt(observationId), vec);
+      return { success: true };
+    } catch (err) {
+      console.error('[openclaw-mem] saveEmbedding error:', err.message);
+      return { success: false, error: err.message };
+    }
+  },
+
+  searchByVector(embedding, limit = 20) {
+    try {
+      const vec = embedding instanceof Float32Array
+        ? embedding
+        : new Float32Array(embedding);
+      const rows = stmts.searchByVector.all(vec, limit);
+      return rows;
+    } catch (err) {
+      console.error('[openclaw-mem] searchByVector error:', err.message);
+      return [];
+    }
+  },
+
+  getEmbeddingCount() {
+    try {
+      return stmts.getEmbeddingCount.get().count;
+    } catch {
+      return 0;
+    }
+  },
+
+  getObservationsWithoutEmbeddings(limit = 100) {
+    try {
+      return stmts.getObservationsWithoutEmbeddings.all(limit);
+    } catch (err) {
+      console.error('[openclaw-mem] getObservationsWithoutEmbeddings error:', err.message);
+      return [];
+    }
   },
 
   // Stats

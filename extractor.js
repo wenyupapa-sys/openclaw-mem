@@ -1,19 +1,31 @@
 /**
  * OpenClaw-Mem LLM Extractor
- * Uses the local OpenClaw Gateway model to extract concepts and metadata
+ *
+ * Structured observation extraction inspired by claude-mem's observer agent pattern.
+ * Uses DeepSeek API to produce rich, searchable memory records.
  */
 
 import { callGatewayChat } from './gateway-llm.js';
 
-// Cache for extracted concepts (to avoid repeated API calls)
+// ── Valid concept categories (fixed taxonomy for consistent search) ──
+const VALID_CONCEPTS = [
+  'how-it-works',      // understanding mechanisms
+  'why-it-exists',     // purpose or rationale
+  'what-changed',      // modifications made
+  'problem-solution',  // issues and their fixes
+  'gotcha',            // traps or edge cases
+  'pattern',           // reusable approach
+  'trade-off'          // pros/cons of a decision
+];
+
+// ── Cache ──
 const conceptCache = new Map();
 const CACHE_MAX_SIZE = 1000;
 const CACHE_TTL = 60 * 60 * 1000; // 1 hour
 
 function getCacheKey(text) {
-  // Simple hash for cache key
   let hash = 0;
-  const str = text.slice(0, 500); // Only hash first 500 chars
+  const str = text.slice(0, 500);
   for (let i = 0; i < str.length; i++) {
     const char = str.charCodeAt(i);
     hash = ((hash << 5) - hash) + char;
@@ -30,7 +42,6 @@ function cleanCache() {
         conceptCache.delete(key);
       }
     }
-    // If still too large, remove oldest entries
     if (conceptCache.size > CACHE_MAX_SIZE) {
       const entries = [...conceptCache.entries()];
       entries.sort((a, b) => a[1].timestamp - b[1].timestamp);
@@ -43,17 +54,13 @@ function cleanCache() {
 }
 
 /**
- * Extract concepts/keywords from text using LLM
- * @param {string} text - The text to extract concepts from
- * @param {object} options - Options
- * @returns {Promise<string[]>} - Array of extracted concepts
+ * Extract concepts from text using LLM
  */
 export async function extractConcepts(text, options = {}) {
   if (!text || typeof text !== 'string' || text.trim().length < 10) {
     return [];
   }
 
-  // Check cache first
   const cacheKey = getCacheKey(text);
   const cached = conceptCache.get(cacheKey);
   if (cached && Date.now() - cached.timestamp < CACHE_TTL) {
@@ -61,123 +68,174 @@ export async function extractConcepts(text, options = {}) {
   }
 
   try {
-    const content = await callGatewayChat([{
-      role: 'user',
-      content: `Extract 3-7 key concepts/topics from this text. Return ONLY a JSON array of strings, no explanation.
+    const content = await callGatewayChat([
+      {
+        role: 'system',
+        content: `You are a knowledge classifier. Categorize the given text into 2-4 concept categories from this fixed list:
+- how-it-works: understanding mechanisms or implementation details
+- why-it-exists: purpose, rationale, or motivation
+- what-changed: modifications, updates, or configuration changes
+- problem-solution: issues encountered and their fixes
+- gotcha: traps, edge cases, or surprising behavior
+- pattern: reusable approaches or best practices
+- trade-off: pros/cons analysis or design decisions
 
-Text: "${text.slice(0, 800)}"
-
-JSON array:`
-    }], { sessionKey: 'extract-concepts', temperature: 0.2, max_tokens: 200 });
+Return ONLY a JSON array of matching categories. No explanation.`
+      },
+      {
+        role: 'user',
+        content: text.slice(0, 2000)
+      }
+    ], { sessionKey: 'extract-concepts', temperature: 0.1, max_tokens: 100 });
 
     if (!content) return [];
-    // Parse JSON array from response
+
     let concepts = [];
     try {
-      // Try to extract JSON array from response
       const match = content.match(/\[[\s\S]*?\]/);
       if (match) {
         concepts = JSON.parse(match[0]);
       }
     } catch (parseErr) {
-      console.error('[openclaw-mem] Failed to parse LLM response:', parseErr.message);
+      console.error('[openclaw-mem] Failed to parse concepts response:', parseErr.message);
       return [];
     }
 
-    // Validate and clean concepts
+    // Validate against fixed taxonomy
     concepts = concepts
-      .filter(c => typeof c === 'string' && c.length > 1 && c.length < 50)
+      .filter(c => typeof c === 'string')
       .map(c => c.trim().toLowerCase())
-      .slice(0, 7);
+      .filter(c => VALID_CONCEPTS.includes(c))
+      .slice(0, 4);
 
-    // Cache the result
     cleanCache();
-    conceptCache.set(cacheKey, {
-      concepts,
-      timestamp: Date.now()
-    });
-
+    conceptCache.set(cacheKey, { concepts, timestamp: Date.now() });
     return concepts;
   } catch (err) {
-    console.error('[openclaw-mem] LLM extraction error:', err.message);
+    console.error('[openclaw-mem] Concept extraction error:', err.message);
     return [];
   }
 }
 
 /**
- * Extract structured information from a tool call
- * @param {object} data - Tool call data
- * @returns {Promise<object>} - Extracted information
+ * Extract structured observation from a tool call
+ *
+ * Produces rich, searchable records with:
+ * - Accurate type classification
+ * - Descriptive title (short, action-oriented)
+ * - Detailed narrative (what happened, how it works, why it matters)
+ * - Structured facts (self-contained, grep-friendly)
+ * - Fixed concept categories
  */
 export async function extractFromToolCall(data) {
   const { tool_name, tool_input, tool_response, filesRead, filesModified } = data;
 
-  // Build context for extraction
+  // Provide generous context (2000 chars each, not 300)
   const inputStr = typeof tool_input === 'string'
-    ? tool_input.slice(0, 300)
-    : JSON.stringify(tool_input).slice(0, 300);
+    ? tool_input.slice(0, 2000)
+    : JSON.stringify(tool_input, null, 0).slice(0, 2000);
 
   const responseStr = typeof tool_response === 'string'
-    ? tool_response.slice(0, 300)
-    : JSON.stringify(tool_response).slice(0, 300);
+    ? tool_response.slice(0, 2000)
+    : JSON.stringify(tool_response, null, 0).slice(0, 2000);
 
   try {
-    const content = await callGatewayChat([{
-      role: 'user',
-      content: `Analyze this tool call and extract structured information. Return ONLY valid JSON.
+    const content = await callGatewayChat([
+      {
+        role: 'system',
+        content: `You are OpenClaw-Mem, a specialized observer that creates searchable memory records for FUTURE SESSIONS.
 
-Tool: ${tool_name}
+Your job: analyze a tool call and produce a structured observation capturing what was LEARNED, BUILT, FIXED, or CONFIGURED.
+
+RULES:
+- Record deliverables and capabilities, not process steps
+- Use action verbs: implemented, fixed, deployed, configured, migrated, optimized, discovered, decided
+- The "narrative" field is the most important: explain WHAT happened, HOW it works, and WHY it matters
+- Facts must be self-contained statements (each fact should make sense without the others)
+- Title should be a short noun phrase (3-10 words) capturing the core topic
+
+TYPE DEFINITIONS (pick exactly one):
+- bugfix: something was broken and is now fixed
+- feature: new capability or functionality added
+- refactor: code restructured without behavior change
+- change: generic modification (docs, config, dependencies)
+- discovery: learning about existing system, reading code, exploring
+- decision: architectural or design choice with rationale
+
+CONCEPT CATEGORIES (pick 1-3):
+- how-it-works: understanding mechanisms
+- why-it-exists: purpose or rationale
+- what-changed: modifications made
+- problem-solution: issues and their fixes
+- gotcha: traps or edge cases
+- pattern: reusable approach
+- trade-off: pros/cons of a decision
+
+Return ONLY valid JSON, no markdown fences, no explanation.`
+      },
+      {
+        role: 'user',
+        content: `Tool: ${tool_name}
 Input: ${inputStr}
 Output: ${responseStr}
 Files read: ${filesRead?.join(', ') || 'none'}
 Files modified: ${filesModified?.join(', ') || 'none'}
 
-Return JSON with these fields:
+Return JSON:
 {
-  "type": "decision|bugfix|feature|refactor|discovery|testing|setup|other",
-  "narrative": "One sentence describing what happened",
-  "facts": ["fact1", "fact2"],
-  "concepts": ["keyword1", "keyword2", "keyword3"]
-}
-
-JSON:`
-    }], { sessionKey: 'extract-toolcall', temperature: 0.2, max_tokens: 300 });
+  "type": "one of: bugfix|feature|refactor|change|discovery|decision",
+  "title": "Short descriptive title (3-10 words)",
+  "narrative": "2-4 sentences: what was done, how it works, why it matters. Be specific and include key details.",
+  "facts": ["Self-contained fact 1", "Self-contained fact 2", "...up to 5"],
+  "concepts": ["category1", "category2"]
+}`
+      }
+    ], { sessionKey: 'extract-toolcall', temperature: 0.2, max_tokens: 800 });
 
     if (!content) throw new Error('empty response');
 
-    // Parse JSON from response
     const match = content.match(/\{[\s\S]*\}/);
     if (match) {
       const result = JSON.parse(match[0]);
+
+      // Validate type
+      const validTypes = ['bugfix', 'feature', 'refactor', 'change', 'discovery', 'decision'];
+      const type = validTypes.includes(result.type) ? result.type : 'discovery';
+
+      // Validate concepts against fixed taxonomy
+      const concepts = Array.isArray(result.concepts)
+        ? result.concepts.filter(c => VALID_CONCEPTS.includes(c)).slice(0, 3)
+        : [];
+
       return {
-        type: result.type || 'other',
-        narrative: result.narrative || '',
-        facts: Array.isArray(result.facts) ? result.facts.slice(0, 5) : [],
-        concepts: Array.isArray(result.concepts) ? result.concepts.slice(0, 7) : []
+        type,
+        title: (result.title || '').slice(0, 120),
+        narrative: (result.narrative || '').slice(0, 1000),
+        facts: Array.isArray(result.facts)
+          ? result.facts.filter(f => typeof f === 'string').slice(0, 5)
+          : [],
+        concepts: concepts.length > 0 ? concepts : ['how-it-works']
       };
     }
   } catch (err) {
     console.error('[openclaw-mem] Tool extraction error:', err.message);
   }
 
-  // Return empty result on error
   return {
-    type: 'other',
+    type: 'discovery',
+    title: '',
     narrative: '',
     facts: [],
-    concepts: []
+    concepts: ['how-it-works']
   };
 }
 
 /**
  * Batch extract concepts from multiple texts
- * @param {string[]} texts - Array of texts to extract from
- * @returns {Promise<Map<string, string[]>>} - Map of text to concepts
  */
 export async function batchExtractConcepts(texts) {
   const results = new Map();
 
-  // Filter out cached results first
   const uncached = [];
   for (const text of texts) {
     const cacheKey = getCacheKey(text);
@@ -189,7 +247,6 @@ export async function batchExtractConcepts(texts) {
     }
   }
 
-  // Process uncached in batches
   const BATCH_SIZE = 5;
   for (let i = 0; i < uncached.length; i += BATCH_SIZE) {
     const batch = uncached.slice(i, i + BATCH_SIZE);

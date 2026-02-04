@@ -13,6 +13,7 @@ import {
   ListToolsRequestSchema,
 } from '@modelcontextprotocol/sdk/types.js';
 import database from './database.js';
+import { callGatewayEmbeddings } from './gateway-llm.js';
 
 // ============ 工具函数 ============
 
@@ -97,7 +98,57 @@ function normalizeIds(input) {
 
 // ============ 搜索功能 ============
 
-function search(args = {}) {
+/**
+ * Hybrid search: merge FTS5 keyword results with vector KNN results.
+ * FTS results get fts_score (normalized 0-1), vector results get vec_score (1 - distance).
+ * Results found in both get a 0.2 intersection bonus.
+ */
+function mergeHybridResults(ftsResults, vectorResults, limit) {
+  // Normalize FTS scores (rank is negative, lower is better)
+  let ftsMin = Infinity, ftsMax = -Infinity;
+  for (const r of ftsResults) {
+    const rank = Math.abs(r.rank ?? 0);
+    if (rank < ftsMin) ftsMin = rank;
+    if (rank > ftsMax) ftsMax = rank;
+  }
+  const ftsRange = ftsMax - ftsMin || 1;
+
+  const scoreMap = new Map(); // id -> { obs, ftsScore, vecScore }
+
+  for (const r of ftsResults) {
+    const rank = Math.abs(r.rank ?? 0);
+    const ftsScore = 1 - ((rank - ftsMin) / ftsRange); // normalize to 0-1, higher is better
+    scoreMap.set(r.id, { obs: r, ftsScore, vecScore: 0 });
+  }
+
+  for (const v of vectorResults) {
+    const vecScore = 1 - (v.distance ?? 0); // cosine distance -> similarity
+    const existing = scoreMap.get(v.observation_id);
+    if (existing) {
+      existing.vecScore = vecScore;
+    } else {
+      // Need to fetch the full observation for vector-only results
+      const obs = database.getObservation(v.observation_id);
+      if (obs) {
+        scoreMap.set(v.observation_id, { obs, ftsScore: 0, vecScore });
+      }
+    }
+  }
+
+  // Calculate combined scores
+  const scored = [];
+  for (const [id, entry] of scoreMap) {
+    const { obs, ftsScore, vecScore } = entry;
+    const inBoth = ftsScore > 0 && vecScore > 0;
+    const combined = (0.4 * ftsScore) + (0.6 * vecScore) + (inBoth ? 0.2 : 0);
+    scored.push({ obs, combined, ftsScore, vecScore });
+  }
+
+  scored.sort((a, b) => b.combined - a.combined);
+  return scored.slice(0, limit);
+}
+
+async function search(args = {}) {
   const query = typeof args === 'string' ? args : (args.query || args.q || '*');
   const limit = args.limit ?? args.maxResults ?? 30;
   const project = args.project || null;
@@ -108,11 +159,33 @@ function search(args = {}) {
   let results;
 
   if (query === '*' || !query) {
-    // 获取最近的 observations
+    // 获取最近的 observations — no embedding needed for recent listing
     results = database.getRecentObservations(project, limit * 2);
   } else {
-    // 搜索
-    results = database.searchObservations(query, limit * 2);
+    // Hybrid search: FTS5 + vector KNN
+    const ftsResults = database.searchObservations(query, limit * 2);
+
+    // Try vector search in parallel
+    let vectorResults = [];
+    try {
+      const embedding = await callGatewayEmbeddings(query);
+      if (embedding) {
+        vectorResults = database.searchByVector(embedding, limit * 2);
+      }
+    } catch (err) {
+      console.error('[openclaw-mem-mcp] Vector search error:', err.message);
+    }
+
+    if (vectorResults.length > 0) {
+      // Merge hybrid results
+      const merged = mergeHybridResults(ftsResults, vectorResults, limit * 2);
+      results = merged.map(m => m.obs);
+      console.error(`[openclaw-mem-mcp] Hybrid search: ${ftsResults.length} FTS + ${vectorResults.length} vector → ${results.length} merged`);
+    } else {
+      // Fallback to FTS-only
+      results = ftsResults;
+      console.error(`[openclaw-mem-mcp] FTS-only search: ${results.length} results`);
+    }
   }
 
   // 过滤
@@ -475,7 +548,7 @@ server.setRequestHandler(CallToolRequestSchema, async (request) => {
         break;
 
       case 'search':
-        result = search(args || {});
+        result = await search(args || {});
         break;
 
       case 'timeline':
@@ -517,6 +590,13 @@ async function main() {
   const transport = new StdioServerTransport();
   await server.connect(transport);
   console.error('[openclaw-mem-mcp] MCP Server started (stdio)');
+
+  // Preload embedding model in background so first search doesn't timeout
+  callGatewayEmbeddings('warmup').then(() => {
+    console.error('[openclaw-mem-mcp] Embedding model preloaded');
+  }).catch(() => {
+    console.error('[openclaw-mem-mcp] Embedding model preload failed (will retry on first search)');
+  });
 }
 
 main().catch((error) => {

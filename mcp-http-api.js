@@ -9,6 +9,7 @@
 
 import http from 'http';
 import database from './database.js';
+import { callGatewayEmbeddings } from './gateway-llm.js';
 
 const PORT = process.env.OPENCLAW_MEM_API_PORT || 18790;
 
@@ -90,9 +91,53 @@ function normalizeIds(input) {
   return ids;
 }
 
+// ============ Hybrid Search ============
+
+function mergeHybridResults(ftsResults, vectorResults, limit) {
+  let ftsMin = Infinity, ftsMax = -Infinity;
+  for (const r of ftsResults) {
+    const rank = Math.abs(r.rank ?? 0);
+    if (rank < ftsMin) ftsMin = rank;
+    if (rank > ftsMax) ftsMax = rank;
+  }
+  const ftsRange = ftsMax - ftsMin || 1;
+
+  const scoreMap = new Map();
+
+  for (const r of ftsResults) {
+    const rank = Math.abs(r.rank ?? 0);
+    const ftsScore = 1 - ((rank - ftsMin) / ftsRange);
+    scoreMap.set(r.id, { obs: r, ftsScore, vecScore: 0 });
+  }
+
+  for (const v of vectorResults) {
+    const vecScore = 1 - (v.distance ?? 0);
+    const existing = scoreMap.get(v.observation_id);
+    if (existing) {
+      existing.vecScore = vecScore;
+    } else {
+      const obs = database.getObservation(v.observation_id);
+      if (obs) {
+        scoreMap.set(v.observation_id, { obs, ftsScore: 0, vecScore });
+      }
+    }
+  }
+
+  const scored = [];
+  for (const [id, entry] of scoreMap) {
+    const { obs, ftsScore, vecScore } = entry;
+    const inBoth = ftsScore > 0 && vecScore > 0;
+    const combined = (0.4 * ftsScore) + (0.6 * vecScore) + (inBoth ? 0.2 : 0);
+    scored.push({ obs, combined });
+  }
+
+  scored.sort((a, b) => b.combined - a.combined);
+  return scored.slice(0, limit).map(s => s.obs);
+}
+
 // ============ API 功能 ============
 
-function search(args = {}) {
+async function search(args = {}) {
   const query = typeof args === 'string' ? args : (args.query || args.q || '*');
   const limit = args.limit ?? 30;
 
@@ -100,7 +145,25 @@ function search(args = {}) {
   if (query === '*' || !query) {
     results = database.getRecentObservations(null, limit);
   } else {
-    results = database.searchObservations(query, limit);
+    // Hybrid search: FTS + vector
+    const ftsResults = database.searchObservations(query, limit * 2);
+
+    let vectorResults = [];
+    try {
+      const embedding = await callGatewayEmbeddings(query);
+      if (embedding) {
+        vectorResults = database.searchByVector(embedding, limit * 2);
+      }
+    } catch (err) {
+      console.error('[openclaw-mem-api] Vector search error:', err.message);
+    }
+
+    if (vectorResults.length > 0) {
+      results = mergeHybridResults(ftsResults, vectorResults, limit);
+      console.log(`[openclaw-mem-api] Hybrid: ${ftsResults.length} FTS + ${vectorResults.length} vector → ${results.length} merged`);
+    } else {
+      results = ftsResults.slice(0, limit);
+    }
   }
 
   // 按日期分组
@@ -229,7 +292,7 @@ const server = http.createServer((req, res) => {
 
   let body = '';
   req.on('data', chunk => body += chunk);
-  req.on('end', () => {
+  req.on('end', async () => {
     // 处理未编码的中文 URL - 手动编码非 ASCII 字符
     let safeUrl = req.url;
     try {
@@ -278,7 +341,7 @@ const server = http.createServer((req, res) => {
           break;
 
         case '/search':
-          result = search(args);
+          result = await search(args);
           break;
 
         case '/timeline':
@@ -342,6 +405,11 @@ curl -X POST "http://localhost:${PORT}/get_observations" -d '{"ids":[123,124]}'
 server.listen(PORT, '127.0.0.1', () => {
   console.log(`[openclaw-mem] HTTP API running on http://127.0.0.1:${PORT}`);
   console.log(`[openclaw-mem] Try: curl "http://127.0.0.1:${PORT}/help"`);
+
+  // Preload embedding model in background
+  callGatewayEmbeddings('warmup').then(() => {
+    console.log('[openclaw-mem] Embedding model preloaded for HTTP API');
+  }).catch(() => {});
 });
 
 // 优雅关闭
